@@ -50,16 +50,6 @@
 
   const TEXT_OPTIONS = ['David', '911'];
 
-  // Mouse gravity (softened Newtonian) — tune for feel vs. stability
-  const MOUSE_GRAVITY = {
-    enabled: true,
-    G: 350000,                  // gravitational constant scale
-    softening: 140,             // prevents singularity (softening length)
-    maxAccel: 40,               // clamp accel magnitude (units/s^2)
-    influenceRadius: Math.max(600, Math.min(window.innerWidth, window.innerHeight) * 0.8)
-  };
-  const MOUSE_INFLUENCE_RADIUS2 = MOUSE_GRAVITY.influenceRadius * MOUSE_GRAVITY.influenceRadius;
-
   // state
   let currentTextIndex = Math.random() > 0.5 ? 0 : 1;
   let assembling = false;
@@ -284,7 +274,7 @@
     requestAnimationFrame(animate);
     const dt = Math.min(0.05, clock.getDelta());
 
-    // world pointer for gravity
+    // world pointer for repulsion
     raycaster.setFromCamera(pointer, camera);
     const worldPointer = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(Math.max(300, camera.position.z * 0.6)));
 
@@ -298,30 +288,6 @@
       let vy = velocities[idx+1];
       let vz = velocities[idx+2];
 
-      // Mouse gravity: softened Newtonian attraction toward worldPointer
-      if(MOUSE_GRAVITY.enabled){
-        const dxm = worldPointer.x - px;
-        const dym = worldPointer.y - py;
-        const dzm = worldPointer.z - pz;
-        const dist2 = dxm*dxm + dym*dym + dzm*dzm;
-        if(dist2 < MOUSE_INFLUENCE_RADIUS2){
-          const soft2 = MOUSE_GRAVITY.softening * MOUSE_GRAVITY.softening;
-          const invDist = 1 / Math.sqrt(dist2 + soft2);
-          const invDist3 = invDist * invDist * invDist;
-          let ax = dxm * (MOUSE_GRAVITY.G * invDist3);
-          let ay = dym * (MOUSE_GRAVITY.G * invDist3);
-          let az = dzm * (MOUSE_GRAVITY.G * invDist3);
-          const aMag = Math.sqrt(ax*ax + ay*ay + az*az);
-          const maxA = (chaos ? MOUSE_GRAVITY.maxAccel*1.4 : (assembling ? MOUSE_GRAVITY.maxAccel : MOUSE_GRAVITY.maxAccel*0.8));
-          if(aMag > maxA){ const s = maxA / aMag; ax *= s; ay *= s; az *= s; }
-          // integrate acceleration into velocity (fps-independent)
-          const dt60 = dt * 60;
-          vx += ax * dt60;
-          vy += ay * dt60;
-          vz += az * dt60;
-        }
-      }
-
       if(chaos || bigBangActive){
         // maintain some chaotic motion but damped so it stays readable
         vx += rand(-0.6,0.6);
@@ -330,12 +296,19 @@
         vx *= 0.987;
         vy *= 0.987;
         vz *= 0.995;
-        // clamp velocity for stability in chaos
-        {
-          const vMag = Math.hypot(vx, vy, vz);
-          const vMax = 22;
-          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
+
+        // small cursor repulsion in chaos as well
+        const dx = px - worldPointer.x;
+        const dy = py - worldPointer.y;
+        const dz = pz - worldPointer.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if(d2 < 120000){
+          const f = (120000 - d2) * 0.0000022;
+          vx += dx * f * 6;
+          vy += dy * f * 6;
+          vz += dz * f * 6;
         }
+
         px += vx * dt * 60;
         py += vy * dt * 60;
         pz += vz * dt * 60;
@@ -361,12 +334,7 @@
 
         // tiny breathing offset applied on top
         const breathe = Math.sin((performance.now()*0.002) + i) * 0.22;
-        // clamp velocity before integration for smoother motion
-        {
-          const vMag = Math.hypot(vx, vy, vz);
-          const vMax = 16;
-          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
-        }
+
         px += vx * dt * 60 + breathe * 0.25;
         py += vy * dt * 60 + Math.cos((performance.now()*0.0016) + i) * 0.18;
         pz += vz * dt * 60;
@@ -376,12 +344,19 @@
         vx += Math.sin(performance.now()*0.0007 + i) * 0.002;
         vy += Math.cos(performance.now()*0.0009 + i) * 0.002;
         vz += Math.sin(performance.now()*0.0005 + i) * 0.001;
-        // clamp velocity for idle stability
-        {
-          const vMag = Math.hypot(vx, vy, vz);
-          const vMax = 12;
-          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
+
+        // pointer repulsion
+        const dx = px - worldPointer.x;
+        const dy = py - worldPointer.y;
+        const dz = pz - worldPointer.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if(d2 < 120000){
+          const f = (120000 - d2) * 0.0000022;
+          vx += dx * f * 6;
+          vy += dy * f * 6;
+          vz += dz * f * 6;
         }
+
         px += vx * dt * 60;
         py += vy * dt * 60;
         pz += vz * dt * 60;
