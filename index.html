@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Reverse Entropy Particle Text (3D, Chaos Mode)</title>
+  <style>
+    html,body{height:100%;margin:0;background:#030305;}
+    #container{width:100%;height:100%;overflow:hidden;}
+    canvas{display:block}
+    /* tiny dev UI for debug when opened in console */
+    .debug-note{position:fixed;left:8px;bottom:8px;color:#999;font-family:monospace;font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+
+  <script type="module">
+  // TODO: replace with quantum-compliant physics engine
+  // dev note: 2AM brain says this looks fine, future me will hate this
+  // warning: touching this may cause the particles to unionize
+  // this is the part where I pretend I understand math
+
+  // Use absolute module URL for Three so sandboxed environments resolve it reliably
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js';
+
+  // Basic scene
+  const container = document.getElementById('container');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x030305);
+
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
+  camera.position.set(0, 0, Math.max(700, window.innerWidth * 0.6));
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  //Cap device pixel ratio to avoid 4K phones melting GPUs
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));  renderer.setSize(window.innerWidth, window.innerHeight);
+  container.appendChild(renderer.domElement);
+
+  // lighting
+  scene.add(new THREE.AmbientLight(0x404050, 0.9));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+  dir.position.set(0.6, 1, 0.6);
+  scene.add(dir);
+
+  // config
+  // Lower particle count on small screens
+  const PARTICLE_COUNT = window.innerWidth < 768 ? 3500 : 7000;
+  const PARTICLE_BASE_SIZE = Math.max(1.0, (window.innerWidth / 1600));
+
+  const TEXT_OPTIONS = ['David', '911'];
+
+  // Mouse gravity (softened Newtonian) — tune for feel vs. stability
+  const MOUSE_GRAVITY = {
+    enabled: true,
+    G: 350000,                  // gravitational constant scale
+    softening: 140,             // prevents singularity (softening length)
+    maxAccel: 40,               // clamp accel magnitude (units/s^2)
+    influenceRadius: Math.max(600, Math.min(window.innerWidth, window.innerHeight) * 0.8)
+  };
+  const MOUSE_INFLUENCE_RADIUS2 = MOUSE_GRAVITY.influenceRadius * MOUSE_GRAVITY.influenceRadius;
+
+  // state
+  let currentTextIndex = Math.random() > 0.5 ? 0 : 1;
+  let assembling = false;
+  let chaos = false;
+  let bigBangActive = false;
+
+  // buffers
+  let particleGeo, particles, material;
+  let positions, velocities, targets; // positions & velocities are Float32Arrays, targets is array of THREE.Vector3
+
+  // pointer
+  const pointer = new THREE.Vector2(0,0);
+  const raycaster = new THREE.Raycaster();
+
+  // util
+  const rand = (a,b)=>Math.random()*(b-a)+a;
+
+  // sprite for particles
+  const spriteDataUrl = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="16" fill="white" opacity="1"/></svg>';
+
+  function createParticleSystem(){
+    particleGeo = new THREE.BufferGeometry();
+    positions = new Float32Array(PARTICLE_COUNT * 3);
+    velocities = new Float32Array(PARTICLE_COUNT * 3);
+    targets = new Array(PARTICLE_COUNT);
+
+    for(let i=0;i<PARTICLE_COUNT;i++){
+      positions[i*3+0] = rand(-window.innerWidth, window.innerWidth);
+      positions[i*3+1] = rand(-window.innerHeight, window.innerHeight);
+      positions[i*3+2] = rand(-1200, 1200);
+
+      velocities[i*3+0] = rand(-0.3,0.3);
+      velocities[i*3+1] = rand(-0.3,0.3);
+      velocities[i*3+2] = rand(-0.3,0.3);
+
+      targets[i] = new THREE.Vector3(positions[i*3+0], positions[i*3+1], positions[i*3+2]);
+    }
+
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+
+    const sprite = new THREE.TextureLoader().load(spriteDataUrl);
+    material = new THREE.PointsMaterial({
+      size: 5 * PARTICLE_BASE_SIZE,
+      map: sprite,
+      transparent: true,
+      alphaTest: 0.01,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      opacity: 0.95
+    });
+
+    particles = new THREE.Points(particleGeo, material);
+    particles.frustumCulled = false;
+    scene.add(particles);
+  }
+
+  // --- TEXT TO TARGETS (canvas sampling) ---
+  // This approach avoids FontLoader/TextGeometry module issues and is robust in sandboxes.
+  function buildTargetsFromCanvas(text){
+    // Draw text on offscreen canvas then sample alpha to create target points
+    const canvas = document.createElement('canvas');
+    const cw = Math.min(2000, Math.max(800, Math.floor(window.innerWidth * 0.9)));
+    const ch = Math.floor(cw * 0.35);
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+
+    // background black
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0,0,cw,ch);
+
+    // choose a bold sans font (available in browsers)
+    const fontSize = Math.floor(cw / (Math.max(4, text.length) * 0.9));
+    ctx.font = `bold ${fontSize}px Arial, Helvetica, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'white';
+
+    // draw text centered
+    ctx.fillText(text, cw/2, ch/2 + (fontSize*0.06));
+
+    const img = ctx.getImageData(0,0,cw,ch);
+    const data = img.data;
+
+    // sample pixels. We'll collect many candidates then pick/dedup to EXACT particle count
+    const candidates = [];
+    const step = 2; // controls density (lower -> denser)
+
+    for(let y=0;y<ch;y+=step){
+      for(let x=0;x<cw;x+=step){
+        const i = (y*cw + x) * 4;
+        const alpha = data[i+3];
+        const r = data[i];
+        // threshold on brightness, can use alpha or r
+        if(alpha > 50 && r > 30){
+          // convert to centered coords and scale to scene
+          const nx = (x - cw/2);
+          const ny = (ch/2 - y);
+          candidates.push(new THREE.Vector3(nx, ny, rand(-20,20)));
+        }
+      }
+    }
+
+    if(candidates.length === 0){
+      console.warn('Text sampling produced 0 candidates for text:', text);
+      // fallback: simple rectangle points
+      for(let i=0;i<PARTICLE_COUNT;i++) candidates.push(new THREE.Vector3(rand(-200,200), rand(-80,80), rand(-10,10)));
+    }
+
+    // Now produce exactly PARTICLE_COUNT targets by sampling (with jitter)
+    const out = new Array(PARTICLE_COUNT);
+    for(let i=0;i<PARTICLE_COUNT;i++){
+      const pick = candidates[Math.floor(Math.random()*candidates.length)].clone();
+      // scale down because canvas px -> world units
+      const scale = Math.min(1.0, window.innerWidth / (cw * 0.9));
+      pick.multiplyScalar(scale * 1.0);
+      // slight jitter to avoid exact overlap
+      pick.x += rand(-1.2,1.2);
+      pick.y += rand(-1.2,1.2);
+      pick.z += rand(-6,6);
+      out[i] = pick;
+    }
+
+    targets = out;
+
+    // ensure there's a faint reference mesh built from the canvas texture for depth perception
+    if(window._refTexture) window._refTexture.dispose();
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    const mat = new THREE.MeshBasicMaterial({map: tex, transparent:true, opacity:0.06});
+    const aspect = cw / ch;
+    const plane = new THREE.PlaneGeometry( (window.innerWidth * 0.6), (window.innerWidth * 0.6) / aspect );
+    if(window._refPlane) scene.remove(window._refPlane);
+    const mesh = new THREE.Mesh(plane, mat);
+    mesh.rotation.x = 0.25;
+    mesh.position.z = 60; // slightly behind particles baseline
+    scene.add(mesh);
+    window._refPlane = mesh;
+    window._refTexture = tex;
+
+    // begin assembling
+    assembling = true;
+    chaos = false;
+    bigBangActive = false;
+  }
+
+  // trigger a softer big bang
+  function triggerBigBang(){
+    bigBangActive = true;
+    assembling = false;
+    chaos = true;
+
+    for(let i=0;i<PARTICLE_COUNT;i++){
+      const idx = i*3;
+      // direction from center + random tilt
+      const cx = positions[idx+0];
+      const cy = positions[idx+1];
+      // compute outward vector relative to center
+      const ox = cx + rand(-200,200);
+      const oy = cy + rand(-200,200);
+      const ang = Math.atan2(oy, ox);
+      const mag = rand(3, 12); // moderate blast strength (softened)
+      velocities[idx+0] = Math.cos(ang) * mag + rand(-1.5,1.5);
+      velocities[idx+1] = Math.sin(ang) * mag + rand(-1.5,1.5);
+      velocities[idx+2] = rand(-3,3);
+    }
+  }
+
+  function reassemble(changeText){
+    // optionally change text
+    if(changeText){
+      currentTextIndex = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+    } else {
+      if(Math.random() > 0.6) currentTextIndex = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+    }
+    buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+  }
+
+  // Create particle system and initial targets
+  createParticleSystem();
+  buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+
+  // Interaction handlers
+  window.addEventListener('pointermove', (e)=>{
+    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = - (e.clientY / window.innerHeight) * 2 + 1;
+  }, { passive: true });
+
+  let mouseDown = false;
+  let firstPress = false;
+  window.addEventListener('pointerdown', (e)=>{
+    if(e.button !== 0) return;
+    mouseDown = true;
+    if(!firstPress){
+      triggerBigBang();
+      firstPress = true;
+    } else {
+      triggerBigBang();
+    }
+  });
+  window.addEventListener('pointerup', (e)=>{
+    if(e.button !== 0) return;
+    mouseDown = false;
+    // when released, reassemble into possibly different text
+    reassemble(true);
+  });
+
+  window.addEventListener('resize', ()=>{
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+
+    // rebuild targets at new resolution for crisp text
+    buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+  });
+
+  // animation loop — velocity integrator + steering to target
+  const clock = new THREE.Clock();
+  let rotX = 0;
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, clock.getDelta());
+
+    // world pointer for gravity
+    raycaster.setFromCamera(pointer, camera);
+    const worldPointer = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(Math.max(300, camera.position.z * 0.6)));
+
+    for(let i=0;i<PARTICLE_COUNT;i++){
+      const idx = i*3;
+      let px = positions[idx+0];
+      let py = positions[idx+1];
+      let pz = positions[idx+2];
+
+      let vx = velocities[idx+0];
+      let vy = velocities[idx+1];
+      let vz = velocities[idx+2];
+
+      // Mouse gravity: softened Newtonian attraction toward worldPointer
+      if(MOUSE_GRAVITY.enabled){
+        const dxm = worldPointer.x - px;
+        const dym = worldPointer.y - py;
+        const dzm = worldPointer.z - pz;
+        const dist2 = dxm*dxm + dym*dym + dzm*dzm;
+        if(dist2 < MOUSE_INFLUENCE_RADIUS2){
+          const soft2 = MOUSE_GRAVITY.softening * MOUSE_GRAVITY.softening;
+          const invDist = 1 / Math.sqrt(dist2 + soft2);
+          const invDist3 = invDist * invDist * invDist;
+          let ax = dxm * (MOUSE_GRAVITY.G * invDist3);
+          let ay = dym * (MOUSE_GRAVITY.G * invDist3);
+          let az = dzm * (MOUSE_GRAVITY.G * invDist3);
+          const aMag = Math.sqrt(ax*ax + ay*ay + az*az);
+          const maxA = (chaos ? MOUSE_GRAVITY.maxAccel*1.4 : (assembling ? MOUSE_GRAVITY.maxAccel : MOUSE_GRAVITY.maxAccel*0.8));
+          if(aMag > maxA){ const s = maxA / aMag; ax *= s; ay *= s; az *= s; }
+          // integrate acceleration into velocity (fps-independent)
+          const dt60 = dt * 60;
+          vx += ax * dt60;
+          vy += ay * dt60;
+          vz += az * dt60;
+        }
+      }
+
+      if(chaos || bigBangActive){
+        // maintain some chaotic motion but damped so it stays readable
+        vx += rand(-0.6,0.6);
+        vy += rand(-0.6,0.6);
+        vz += rand(-0.3,0.3);
+        vx *= 0.987;
+        vy *= 0.987;
+        vz *= 0.995;
+        // clamp velocity for stability in chaos
+        {
+          const vMag = Math.hypot(vx, vy, vz);
+          const vMax = 22;
+          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
+        }
+        px += vx * dt * 60;
+        py += vy * dt * 60;
+        pz += vz * dt * 60;
+
+      } else if(assembling && targets && targets[i]){
+        // steer towards target gently
+        const t = targets[i];
+        const dx = t.x - px;
+        const dy = t.y - py;
+        const dz = t.z - pz;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+
+        // steering strength: slow for smooth assembly
+        const steer = Math.min(0.007, 0.0009 * dist);
+        vx += dx * steer;
+        vy += dy * steer;
+        vz += dz * steer;
+
+        // damping to settle
+        vx *= 0.90;
+        vy *= 0.90;
+        vz *= 0.92;
+
+        // tiny breathing offset applied on top
+        const breathe = Math.sin((performance.now()*0.002) + i) * 0.22;
+        // clamp velocity before integration for smoother motion
+        {
+          const vMag = Math.hypot(vx, vy, vz);
+          const vMax = 16;
+          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
+        }
+        px += vx * dt * 60 + breathe * 0.25;
+        py += vy * dt * 60 + Math.cos((performance.now()*0.0016) + i) * 0.18;
+        pz += vz * dt * 60;
+
+      } else {
+        // idle float
+        vx += Math.sin(performance.now()*0.0007 + i) * 0.002;
+        vy += Math.cos(performance.now()*0.0009 + i) * 0.002;
+        vz += Math.sin(performance.now()*0.0005 + i) * 0.001;
+        // clamp velocity for idle stability
+        {
+          const vMag = Math.hypot(vx, vy, vz);
+          const vMax = 12;
+          if(vMag > vMax){ const s = vMax / vMag; vx *= s; vy *= s; vz *= s; }
+        }
+        px += vx * dt * 60;
+        py += vy * dt * 60;
+        pz += vz * dt * 60;
+
+        vx *= 0.995; vy *= 0.995; vz *= 0.995;
+      }
+
+      // keep particles in soft bounds so they reappear nicely
+      const bound = Math.max(window.innerWidth, window.innerHeight) * 2;
+      if(Math.abs(px) > bound || Math.abs(py) > bound || pz > 4000 || pz < -4000){
+        px = THREE.MathUtils.lerp(px, rand(-200,200), 0.04);
+        py = THREE.MathUtils.lerp(py, rand(-200,200), 0.04);
+        pz = THREE.MathUtils.lerp(pz, rand(-600,600), 0.04);
+      }
+
+      positions[idx+0] = px;
+      positions[idx+1] = py;
+      positions[idx+2] = pz;
+
+      velocities[idx+0] = vx;
+      velocities[idx+1] = vy;
+      velocities[idx+2] = vz;
+    }
+
+    // notify attribute update
+    particleGeo.attributes.position.needsUpdate = true;
+
+    // rotate the whole cloud gently around X axis — speed up a bit when assembled
+    rotX += (assembling ? 0.0022 : 0.0009);
+    if(particles) particles.rotation.x = rotX;
+    if(window._refPlane) window._refPlane.rotation.x = rotX + 0.25;
+
+    renderer.render(scene, camera);
+  }
+
+  animate();
+
+  // Convenience API for console tuning
+  window.REVERSE_PARTICLE_DEBUG = {
+    triggerBigBang: triggerBigBang,
+    reassemble: (change)=>reassemble(!!change),
+    setText: (s)=>{ if(typeof s === 'string'){ TEXT_OPTIONS[0]=s; buildTargetsFromCanvas(s);} },
+    getState: ()=>({assembling,chaos,bigBangActive,currentText: TEXT_OPTIONS[currentTextIndex]})
+  };
+
+  </script>
+</body>
+</html>
