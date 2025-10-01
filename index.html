@@ -10,10 +10,26 @@
     canvas{display:block}
     /* tiny dev UI for debug when opened in console */
     .debug-note{position:fixed;left:8px;bottom:8px;color:#999;font-family:monospace;font-size:12px}
+    .panel{position:fixed;top:10px;left:10px;background:rgba(10,10,14,0.7);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:8px 10px;color:#ddd;font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto;z-index:10}
+    .panel h3{margin:0 0 6px 0;font-size:12px;color:#aaa;font-weight:600}
+    .panel .row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+    .panel label{white-space:nowrap;display:flex;gap:6px;align-items:center;cursor:pointer}
+    .panel input{accent-color:#6cf}
   </style>
 </head>
 <body>
   <div id="container"></div>
+  <div class="panel" id="effectsPanel">
+    <h3>Quantum Effects</h3>
+    <div class="row">
+      <label><input type="checkbox" id="chkDoubleSlit">Double Slit</label>
+      <label><input type="checkbox" id="chkSuperposition">Superposition</label>
+      <label><input type="checkbox" id="chkEntangle">Entangle</label>
+      <label><input type="checkbox" id="chkPilotWave">Pilot Wave</label>
+      <label><input type="checkbox" id="chkTunneling">Tunneling</label>
+      <label><input type="checkbox" id="chkZeno">Zeno</label>
+    </div>
+  </div>
 
   <script type="module">
   // TODO: replace with quantum-compliant physics engine
@@ -49,6 +65,78 @@
   const PARTICLE_BASE_SIZE = Math.max(1.0, (window.innerWidth / 1600));
 
   const TEXT_OPTIONS = ['David', '911'];
+
+  // Near-field pointer force: snappy pull (default) and push (when mouse held)
+  const POINTER_FORCE = {
+    radius: Math.max(110, Math.min(window.innerWidth, window.innerHeight) * 0.08),
+    pullStrength: 14,
+    pushStrength: 18,
+    softening: 16,
+    maxDeltaVPerFrame: 2.2 // limit per-frame impulse (velocity units per 60fps frame)
+  };
+  const POINTER_RADIUS2 = POINTER_FORCE.radius * POINTER_FORCE.radius;
+
+  // Effect toggles (UI-bound)
+  const EFFECTS = {
+    doubleSlit: false,
+    superposition: true,
+    entangle: false,
+    pilotWave: false,
+    tunneling: false,
+    zeno: false,
+  };
+
+  // Superposition state
+  let lambda = null;        // blend coeff per particle in [0,1]
+  let lambdaTarget = null;  // desired blend coeff per particle
+  let superpositionCollapsed = false;
+  let superpositionResumeAt = 0;
+  const SUPERPOSITION_HOLD_MS = 900;
+
+  function seeded01(index){
+    const s = Math.sin(index * 12.9898) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+  function lambdaOsc(index, t){
+    const w = 0.6 + seeded01(index) * 1.4; // per-particle angular speed factor
+    return 0.5 + 0.45 * Math.sin(t * w + index * 0.15);
+  }
+  function ensureLambdaArrays(){
+    if(!lambda || lambda.length !== PARTICLE_COUNT){
+      lambda = new Float32Array(PARTICLE_COUNT);
+      lambdaTarget = new Float32Array(PARTICLE_COUNT);
+      for(let i=0;i<PARTICLE_COUNT;i++){
+        const v = seeded01(i);
+        lambda[i] = v;
+        lambdaTarget[i] = v;
+      }
+    }
+  }
+  function measurementCollapse(worldPointer){
+    ensureLambdaArrays();
+    superpositionCollapsed = true;
+    const sigma = Math.max(90, Math.min(window.innerWidth, window.innerHeight) * 0.06);
+    const invSigma2 = 1 / (sigma * sigma);
+    for(let i=0;i<PARTICLE_COUNT;i++){
+      const idx = i*3;
+      const dx = worldPointer.x - positions[idx+0];
+      const dy = worldPointer.y - positions[idx+1];
+      const dz = worldPointer.z - positions[idx+2];
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const pNear = Math.exp(-d2 * invSigma2); // 1 near pointer, ->0 far
+      // Unbiased baseline 0.5, small local bias around pointer
+      const noise = (seeded01(i + 1337) - 0.5) * 0.1 + (Math.random()-0.5)*0.04;
+      const pB = Math.min(1, Math.max(0, 0.5 + 0.3 * (pNear - 0.5) + noise));
+      const r = seeded01(i * 2.123 + 7.77);
+      lambdaTarget[i] = (r < pB) ? 1.0 : 0.0;
+    }
+  }
+  function resumeSuperposition(){
+    ensureLambdaArrays();
+    superpositionCollapsed = false;
+    superpositionResumeAt = performance.now() + SUPERPOSITION_HOLD_MS;
+    // keep current lambda as starting point; targets will be driven by oscillation each frame
+  }
 
   // state
   let currentTextIndex = Math.random() > 0.5 ? 0 : 1;
@@ -97,8 +185,8 @@
       transparent: true,
       alphaTest: 0.01,
       depthTest: true,
-      blending: THREE.AdditiveBlending,
-      opacity: 0.95
+      blending: THREE.NormalBlending,
+      opacity: 0.85
     });
 
     particles = new THREE.Points(particleGeo, material);
@@ -174,28 +262,32 @@
     }
 
     targets = out;
+    // store as A/B when superposition is enabled for both words
+    if(EFFECTS.superposition){
+      if(text === TEXT_OPTIONS[0]) targetsA = out.map(v=>v.clone());
+      if(text === TEXT_OPTIONS[1]) targetsB = out.map(v=>v.clone());
+    }
 
-    // ensure there's a faint reference mesh built from the canvas texture for depth perception
-    if(window._refTexture) window._refTexture.dispose();
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    const mat = new THREE.MeshBasicMaterial({map: tex, transparent:true, opacity:0.06});
-    const aspect = cw / ch;
-    const plane = new THREE.PlaneGeometry( (window.innerWidth * 0.6), (window.innerWidth * 0.6) / aspect );
-    if(window._refPlane) scene.remove(window._refPlane);
-    const mesh = new THREE.Mesh(plane, mat);
-    mesh.rotation.x = 0.25;
-    mesh.position.z = 60; // slightly behind particles baseline
-    scene.add(mesh);
-    window._refPlane = mesh;
-    window._refTexture = tex;
+    // remove any previous faint text plane if it exists (no longer used)
+    if(window._refPlane){
+      if(window._refPlane.geometry) window._refPlane.geometry.dispose();
+      if(window._refPlane.material) window._refPlane.material.dispose();
+      scene.remove(window._refPlane);
+      window._refPlane = undefined;
+    }
+    if(window._refTexture){
+      window._refTexture.dispose();
+      window._refTexture = undefined;
+    }
 
     // begin assembling
     assembling = true;
     chaos = false;
     bigBangActive = false;
   }
+
+  // --- Superposition targets (precompute) ---
+  let targetsA = null, targetsB = null; // for superposition morph
 
   // trigger a softer big bang
   function triggerBigBang(){
@@ -232,6 +324,13 @@
   // Create particle system and initial targets
   createParticleSystem();
   buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+  // If superposition, also build the alternate targets once
+  if(EFFECTS.superposition){
+    const other = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+    buildTargetsFromCanvas(TEXT_OPTIONS[other]);
+    // restore to current after capturing both
+    buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+  }
 
   // Interaction handlers
   window.addEventListener('pointermove', (e)=>{
@@ -244,19 +343,57 @@
   window.addEventListener('pointerdown', (e)=>{
     if(e.button !== 0) return;
     mouseDown = true;
-    if(!firstPress){
-      triggerBigBang();
-      firstPress = true;
-    } else {
-      triggerBigBang();
-    }
+    if(EFFECTS.superposition){ measurementCollapse(raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(Math.max(300, camera.position.z * 0.6)))) }
+    else { if(!firstPress){ triggerBigBang(); firstPress = true; } else { triggerBigBang(); } }
   });
   window.addEventListener('pointerup', (e)=>{
     if(e.button !== 0) return;
     mouseDown = false;
-    // when released, reassemble into possibly different text
-    reassemble(true);
+    if(EFFECTS.superposition){ resumeSuperposition(); }
+    else { reassemble(true); }
   });
+
+  // Keep Big Bang available on Space key
+  window.addEventListener('keydown', (e)=>{
+    if(e.code === 'Space'){
+      e.preventDefault();
+      triggerBigBang();
+    }
+  });
+
+  // Hook up UI toggles
+  const $ = (id)=>document.getElementById(id);
+  const chkDoubleSlit = $('chkDoubleSlit');
+  const chkSuperposition = $('chkSuperposition');
+  const chkEntangle = $('chkEntangle');
+  const chkPilotWave = $('chkPilotWave');
+  const chkTunneling = $('chkTunneling');
+  const chkZeno = $('chkZeno');
+
+  const applyEffectsFromUI = ()=>{
+    EFFECTS.doubleSlit = !!chkDoubleSlit?.checked;
+    EFFECTS.superposition = !!chkSuperposition?.checked;
+    EFFECTS.entangle = !!chkEntangle?.checked;
+    EFFECTS.pilotWave = !!chkPilotWave?.checked;
+    EFFECTS.tunneling = !!chkTunneling?.checked;
+    EFFECTS.zeno = !!chkZeno?.checked;
+    // build auxiliary targets if superposition toggled on
+    if(EFFECTS.superposition){
+      const cur = currentTextIndex;
+      const other = (cur + 1) % TEXT_OPTIONS.length;
+      buildTargetsFromCanvas(TEXT_OPTIONS[other]);
+      buildTargetsFromCanvas(TEXT_OPTIONS[cur]);
+    }
+  };
+
+  [chkDoubleSlit,chkSuperposition,chkEntangle,chkPilotWave,chkTunneling,chkZeno].forEach(el=>{
+    if(!el) return;
+    el.addEventListener('change', applyEffectsFromUI);
+  });
+
+  // Defaults: Superposition on by default
+  applyEffectsFromUI();
+  if(chkSuperposition){ chkSuperposition.checked = true; applyEffectsFromUI(); }
 
   window.addEventListener('resize', ()=>{
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -265,6 +402,11 @@
 
     // rebuild targets at new resolution for crisp text
     buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+    if(EFFECTS.superposition){
+      const other = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+      buildTargetsFromCanvas(TEXT_OPTIONS[other]);
+      buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+    }
   });
 
   // animation loop — velocity integrator + steering to target
@@ -274,7 +416,7 @@
     requestAnimationFrame(animate);
     const dt = Math.min(0.05, clock.getDelta());
 
-    // world pointer for repulsion
+    // world pointer for local pointer force
     raycaster.setFromCamera(pointer, camera);
     const worldPointer = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(Math.max(300, camera.position.z * 0.6)));
 
@@ -288,6 +430,86 @@
       let vy = velocities[idx+1];
       let vz = velocities[idx+2];
 
+      // Near-field pointer impulse (acts only very close). Pull by default, push when mouseDown.
+      {
+        const dxp = worldPointer.x - px;
+        const dyp = worldPointer.y - py;
+        const dzp = worldPointer.z - pz;
+        const d2p = dxp*dxp + dyp*dyp + dzp*dzp;
+        if(d2p < POINTER_RADIUS2){
+          const dist = Math.sqrt(d2p + POINTER_FORCE.softening*POINTER_FORCE.softening);
+          // normalized direction
+          let ux = dxp / dist, uy = dyp / dist, uz = dzp / dist;
+          // choose strength by mode
+          const strength = mouseDown ? POINTER_FORCE.pushStrength : POINTER_FORCE.pullStrength;
+          // stronger when closer; quadratic falloff
+          const falloff = 1 - (d2p / POINTER_RADIUS2);
+          let ax = ux * strength * falloff;
+          let ay = uy * strength * falloff;
+          let az = uz * strength * falloff;
+          if(mouseDown){ // push flips direction
+            ax = -ax; ay = -ay; az = -az;
+          }
+          // clamp per-frame delta-V for stability
+          const dt60 = dt * 60;
+          let dvx = ax * dt60, dvy = ay * dt60, dvz = az * dt60;
+          const dvMag = Math.hypot(dvx, dvy, dvz);
+          if(dvMag > POINTER_FORCE.maxDeltaVPerFrame){
+            const s = POINTER_FORCE.maxDeltaVPerFrame / dvMag;
+            dvx *= s; dvy *= s; dvz *= s;
+          }
+          vx += dvx; vy += dvy; vz += dvz;
+        }
+      }
+
+      if(EFFECTS.doubleSlit){
+        // Simple double-slit interference tug near the cursor
+        // Two virtual slits offset horizontally around the pointer
+        const slitSep = Math.max(40, Math.min(window.innerWidth, window.innerHeight) * 0.06);
+        const slit1 = {x: worldPointer.x - slitSep*0.5, y: worldPointer.y, z: worldPointer.z};
+        const slit2 = {x: worldPointer.x + slitSep*0.5, y: worldPointer.y, z: worldPointer.z};
+        const k = 0.06; // wave number scale for fringe density
+        const s1x = slit1.x - px, s1y = slit1.y - py, s1z = slit1.z - pz;
+        const s2x = slit2.x - px, s2y = slit2.y - py, s2z = slit2.z - pz;
+        const d1 = Math.hypot(s1x, s1y, s1z) + 1e-6;
+        const d2 = Math.hypot(s2x, s2y, s2z) + 1e-6;
+        const A1 = Math.exp(-d1*0.01), A2 = Math.exp(-d2*0.01);
+        const phase = Math.cos(k*(d1 - d2));
+        const I = (A1 + A2 + 2*Math.sqrt(A1*A2)*phase);
+        const gradx = ((s1x/d1) * A1 + (s2x/d2) * A2) * 0.004 * I;
+        const grady = ((s1y/d1) * A1 + (s2y/d2) * A2) * 0.004 * I;
+        const gradz = ((s1z/d1) * A1 + (s2z/d2) * A2) * 0.003 * I;
+        vx += gradx; vy += grady; vz += gradz;
+      }
+
+      if(EFFECTS.superposition && targetsA && targetsB){
+        ensureLambdaArrays();
+        let l = lambda[i];
+        const tnow = performance.now()*0.0015;
+        if(superpositionCollapsed){
+          // ease lambda toward its target
+          const lt = lambdaTarget[i];
+          l += (lt - l) * 0.08; // approach
+        } else {
+          // hold the collapsed state briefly, then oscillate
+          if(performance.now() < superpositionResumeAt){
+            // keep current l
+          } else {
+            l = lambdaOsc(i, tnow) * 1.0; // already 0..1
+          }
+        }
+        lambda[i] = l;
+        const tA = targetsA[i];
+        const tB = targetsB[i] || tA;
+        const tx = tA.x + (tB.x - tA.x) * l;
+        const ty = tA.y + (tB.y - tA.y) * l;
+        const tz = tA.z + (tB.z - tA.z) * l;
+        const sdx = tx - px, sdy = ty - py, sdz = tz - pz;
+        const sDist = Math.sqrt(sdx*sdx + sdy*sdy + sdz*sdz) + 1e-6;
+        const sSteer = Math.min(0.010, 0.0012 * sDist);
+        vx += sdx * sSteer; vy += sdy * sSteer; vz += sdz * sSteer;
+      }
+
       if(chaos || bigBangActive){
         // maintain some chaotic motion but damped so it stays readable
         vx += rand(-0.6,0.6);
@@ -296,18 +518,6 @@
         vx *= 0.987;
         vy *= 0.987;
         vz *= 0.995;
-
-        // small cursor repulsion in chaos as well
-        const dx = px - worldPointer.x;
-        const dy = py - worldPointer.y;
-        const dz = pz - worldPointer.z;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        if(d2 < 120000){
-          const f = (120000 - d2) * 0.0000022;
-          vx += dx * f * 6;
-          vy += dy * f * 6;
-          vz += dz * f * 6;
-        }
 
         px += vx * dt * 60;
         py += vy * dt * 60;
@@ -344,18 +554,6 @@
         vx += Math.sin(performance.now()*0.0007 + i) * 0.002;
         vy += Math.cos(performance.now()*0.0009 + i) * 0.002;
         vz += Math.sin(performance.now()*0.0005 + i) * 0.001;
-
-        // pointer repulsion
-        const dx = px - worldPointer.x;
-        const dy = py - worldPointer.y;
-        const dz = pz - worldPointer.z;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        if(d2 < 120000){
-          const f = (120000 - d2) * 0.0000022;
-          vx += dx * f * 6;
-          vy += dy * f * 6;
-          vz += dz * f * 6;
-        }
 
         px += vx * dt * 60;
         py += vy * dt * 60;
