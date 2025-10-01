@@ -272,12 +272,8 @@
   window.addEventListener('pointerup', (e)=>{
     if(e.button !== 0) return;
     mouseDown = false;
-    // When released, finish the morph and reassemble
-    if(superpositionActive){
-      superpositionActive = false;
-      currentTextIndex = (currentTextIndex + 1) % TEXT_OPTIONS.length;
-      buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
-    }
+    // When released, the superposition will complete its transition in animate loop
+    // Then reassemble into the new text
   });
 
   window.addEventListener('resize', ()=>{
@@ -296,10 +292,20 @@
     requestAnimationFrame(animate);
     const dt = Math.min(0.05, clock.getDelta());
 
-    // Progress superposition morph
-    if(superpositionActive && morphProgress < 1){
-      morphProgress += 0.012; // smooth transition over ~2-3 seconds
-      if(morphProgress > 1) morphProgress = 1;
+    // Oscillate superposition morph while active (mouse held down)
+    if(superpositionActive && mouseDown){
+      // Oscillate between 0 and 1 continuously
+      morphProgress = (Math.sin(performance.now() * 0.0015) + 1) * 0.5;
+    } else if(superpositionActive && !mouseDown){
+      // When released, smoothly complete the transition to the new text
+      morphProgress += 0.015;
+      if(morphProgress >= 1){
+        morphProgress = 1;
+        // Transition complete, reassemble into new text
+        superpositionActive = false;
+        currentTextIndex = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+        buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+      }
     }
 
     // world pointer for repulsion
