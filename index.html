@@ -360,6 +360,14 @@
         vx *= 0.995; vy *= 0.995; vz *= 0.995;
       }
 
+      // Quantum uncertainty: subtle random position flicker
+      // Each particle has a small probability of a tiny position "jump"
+      if(assembling && Math.random() < 0.008){
+        px += rand(-3, 3);
+        py += rand(-3, 3);
+        pz += rand(-2, 2);
+      }
+
       // keep particles in soft bounds so they reappear nicely
       const bound = Math.max(window.innerWidth, window.innerHeight) * 2;
       if(Math.abs(px) > bound || Math.abs(py) > bound || pz > 4000 || pz < -4000){
