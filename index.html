@@ -175,21 +175,17 @@
 
     targets = out;
 
-    // ensure there's a faint reference mesh built from the canvas texture for depth perception
-    if(window._refTexture) window._refTexture.dispose();
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    const mat = new THREE.MeshBasicMaterial({map: tex, transparent:true, opacity:0.06});
-    const aspect = cw / ch;
-    const plane = new THREE.PlaneGeometry( (window.innerWidth * 0.6), (window.innerWidth * 0.6) / aspect );
-    if(window._refPlane) scene.remove(window._refPlane);
-    const mesh = new THREE.Mesh(plane, mat);
-    mesh.rotation.x = 0.25;
-    mesh.position.z = 60; // slightly behind particles baseline
-    scene.add(mesh);
-    window._refPlane = mesh;
-    window._refTexture = tex;
+    // remove any previous faint text plane if it exists (no longer used)
+    if(window._refPlane){
+      if(window._refPlane.geometry) window._refPlane.geometry.dispose();
+      if(window._refPlane.material) window._refPlane.material.dispose();
+      scene.remove(window._refPlane);
+      window._refPlane = undefined;
+    }
+    if(window._refTexture){
+      window._refTexture.dispose();
+      window._refTexture = undefined;
+    }
 
     // begin assembling
     assembling = true;
