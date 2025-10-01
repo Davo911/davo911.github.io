@@ -56,6 +56,13 @@
   let chaos = false;
   let bigBangActive = false;
 
+  // Superposition state
+  let superpositionActive = false;
+  let targetsA = null; // targets for first text
+  let targetsB = null; // targets for second text
+  let particleRoles = null; // array marking each particle as 'morph' or 'explode'
+  let morphProgress = 0; // 0 to 1, controls blend between A and B
+
   // buffers
   let particleGeo, particles, material;
   let positions, velocities, targets; // positions & velocities are Float32Arrays, targets is array of THREE.Vector3
@@ -174,6 +181,10 @@
     }
 
     targets = out;
+    
+    // Store as A or B for superposition
+    if(text === TEXT_OPTIONS[0]) targetsA = out.map(v => v.clone());
+    if(text === TEXT_OPTIONS[1]) targetsB = out.map(v => v.clone());
 
     // remove any previous faint text plane if it exists (no longer used)
     if(window._refPlane){
@@ -193,25 +204,33 @@
     bigBangActive = false;
   }
 
-  // trigger a softer big bang
-  function triggerBigBang(){
-    bigBangActive = true;
+  // Hybrid explosion + superposition transition
+  function triggerHybridTransition(){
+    superpositionActive = true;
     assembling = false;
-    chaos = true;
-
+    chaos = false;
+    bigBangActive = false;
+    morphProgress = 0;
+    
+    // Assign roles: 60% morph between texts, 40% explode
+    if(!particleRoles) particleRoles = new Array(PARTICLE_COUNT);
+    
     for(let i=0;i<PARTICLE_COUNT;i++){
-      const idx = i*3;
-      // direction from center + random tilt
-      const cx = positions[idx+0];
-      const cy = positions[idx+1];
-      // compute outward vector relative to center
-      const ox = cx + rand(-200,200);
-      const oy = cy + rand(-200,200);
-      const ang = Math.atan2(oy, ox);
-      const mag = rand(3, 12); // moderate blast strength (softened)
-      velocities[idx+0] = Math.cos(ang) * mag + rand(-1.5,1.5);
-      velocities[idx+1] = Math.sin(ang) * mag + rand(-1.5,1.5);
-      velocities[idx+2] = rand(-3,3);
+      particleRoles[i] = Math.random() < 0.6 ? 'morph' : 'explode';
+      
+      // For exploding particles, give them blast velocity
+      if(particleRoles[i] === 'explode'){
+        const idx = i*3;
+        const cx = positions[idx+0];
+        const cy = positions[idx+1];
+        const ox = cx + rand(-200,200);
+        const oy = cy + rand(-200,200);
+        const ang = Math.atan2(oy, ox);
+        const mag = rand(4, 14);
+        velocities[idx+0] = Math.cos(ang) * mag + rand(-2,2);
+        velocities[idx+1] = Math.sin(ang) * mag + rand(-2,2);
+        velocities[idx+2] = rand(-4,4);
+      }
     }
   }
 
@@ -227,6 +246,11 @@
 
   // Create particle system and initial targets
   createParticleSystem();
+  // Build both text targets for superposition
+  buildTargetsFromCanvas(TEXT_OPTIONS[0]);
+  buildTargetsFromCanvas(TEXT_OPTIONS[1]);
+  // Start with first text
+  currentTextIndex = 0;
   buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
 
   // Interaction handlers
@@ -240,18 +264,20 @@
   window.addEventListener('pointerdown', (e)=>{
     if(e.button !== 0) return;
     mouseDown = true;
-    if(!firstPress){
-      triggerBigBang();
-      firstPress = true;
-    } else {
-      triggerBigBang();
+    // Trigger hybrid transition if we have both targets
+    if(targetsA && targetsB){
+      triggerHybridTransition();
     }
   });
   window.addEventListener('pointerup', (e)=>{
     if(e.button !== 0) return;
     mouseDown = false;
-    // when released, reassemble into possibly different text
-    reassemble(true);
+    // When released, finish the morph and reassemble
+    if(superpositionActive){
+      superpositionActive = false;
+      currentTextIndex = (currentTextIndex + 1) % TEXT_OPTIONS.length;
+      buildTargetsFromCanvas(TEXT_OPTIONS[currentTextIndex]);
+    }
   });
 
   window.addEventListener('resize', ()=>{
@@ -270,6 +296,12 @@
     requestAnimationFrame(animate);
     const dt = Math.min(0.05, clock.getDelta());
 
+    // Progress superposition morph
+    if(superpositionActive && morphProgress < 1){
+      morphProgress += 0.012; // smooth transition over ~2-3 seconds
+      if(morphProgress > 1) morphProgress = 1;
+    }
+
     // world pointer for repulsion
     raycaster.setFromCamera(pointer, camera);
     const worldPointer = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(Math.max(300, camera.position.z * 0.6)));
@@ -284,7 +316,44 @@
       let vy = velocities[idx+1];
       let vz = velocities[idx+2];
 
-      if(chaos || bigBangActive){
+      if(superpositionActive && particleRoles && particleRoles[i]){
+        // Hybrid behavior: morph or explode based on role
+        if(particleRoles[i] === 'morph' && targetsA && targetsB){
+          // Smoothly morph between text A and text B
+          const tA = targetsA[i];
+          const tB = targetsB[i];
+          const tx = tA.x + (tB.x - tA.x) * morphProgress;
+          const ty = tA.y + (tB.y - tA.y) * morphProgress;
+          const tz = tA.z + (tB.z - tA.z) * morphProgress;
+          
+          const dx = tx - px;
+          const dy = ty - py;
+          const dz = tz - pz;
+          const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+          
+          const steer = Math.min(0.01, 0.0012 * dist);
+          vx += dx * steer;
+          vy += dy * steer;
+          vz += dz * steer;
+          
+          vx *= 0.92;
+          vy *= 0.92;
+          vz *= 0.94;
+          
+          px += vx * dt * 60;
+          py += vy * dt * 60;
+          pz += vz * dt * 60;
+        } else {
+          // Exploding particles
+          vx *= 0.985;
+          vy *= 0.985;
+          vz *= 0.992;
+          
+          px += vx * dt * 60;
+          py += vy * dt * 60;
+          pz += vz * dt * 60;
+        }
+      } else if(chaos || bigBangActive){
         // maintain some chaotic motion but damped so it stays readable
         vx += rand(-0.6,0.6);
         vy += rand(-0.6,0.6);
